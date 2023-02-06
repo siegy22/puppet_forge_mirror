@@ -1,0 +1,62 @@
+#!/usr/bin/env ruby
+
+require 'thor'
+require 'puppet_forge'
+require 'pathname'
+require 'progress_bar'
+require 'typhoeus'
+require 'json'
+require 'uri'
+
+class MirrorForge < Thor
+  desc "mirror FOLDER", "Mirror all puppet forge releases into the given folder"
+  def mirror(folder)
+    forgeapi_uri = URI("https://forgeapi.puppetlabs.com/v3/releases")
+    total = JSON.parse(Typhoeus.get(forgeapi_uri).body)["pagination"]["total"]
+    progress = ProgressBar.new(total)
+
+    hydra = Typhoeus::Hydra.new
+
+    releases = []
+    0.step(by: 100, to: total + 100) do |offset|
+      request = Typhoeus::Request.new("https://forgeapi.puppetlabs.com/v3/releases?limit=100&offset=#{offset}")
+      request.on_complete do |response|
+        json = JSON.parse(response.body)
+        releases += json["results"]
+        progress.increment! 100
+      end
+      hydra.queue(request)
+    end
+
+    hydra.run
+
+    p releases.count
+
+    progress = ProgressBar.new(total)
+
+    releases.each do |release|
+      download_path = Pathname(File.join(folder, release["owner"]["slug"], "#{release["slug"]}.tar.gz"))
+
+      # TODO md5 check
+
+      downloaded_file = nil
+      request = Typhoeus::Request.new(URI("https://forgeapi.puppetlabs.com#{release["file_uri"]}"))
+      request.on_body do |chunk|
+        downloaded_file = File.open(download_path, 'wb')
+        downloaded_file.write(chunk)
+      end
+      request.on_complete do |response|
+        p response.code unless response.success?
+      ensure
+        downloaded_file.close
+        progress.increment!
+      end
+      hydra.queue(request)
+    end
+
+    hydra.run
+
+  end
+end
+
+MirrorForge.start(ARGV)
